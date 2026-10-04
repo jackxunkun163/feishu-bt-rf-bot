@@ -1,0 +1,3 @@
+* text=auto eol=lf
+# 测试样例需按原样保存（含 CRLF），用于验证换行符保留
+tests/fixture_project/** -text

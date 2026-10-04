@@ -1,0 +1,82 @@
+# 复制为 config.yaml 后修改
+feishu:
+  app_id: cli_xxxxxxxxxxxxxxxx        # 也可用环境变量 FEISHU_APP_ID
+  app_secret: xxxxxxxxxxxxxxxxxxxxxxxx # 也可用环境变量 FEISHU_APP_SECRET
+  # 允许使用机器人的用户 open_id，留空表示所有能给机器人发消息的人都可以用
+  allowed_users: []
+  admins: []             # 可执行 /unblock 的 open_id，留空表示白名单内的人都可以
+  alert_chat_id: null    # 告警群 chat_id（机器人需在群内），启动/崩溃恢复/还原失败/磁盘不足时通知
+
+workdir: data            # 编译日志、diff、历史记录保存目录（相对本文件）
+default_project: k6789   # 消息里没写 "项目=" 时使用
+
+limits:
+  max_queue: 10                 # 排队任务总数上限
+  max_jobs_per_user: 2          # 每人同时排队/编译的任务数
+  max_message_chars: 8000
+  max_message_age_minutes: 10   # 忽略更早的消息（防止重启后飞书补推导致重复编译）
+  max_retries_after_crash: 1    # 机器人崩溃时被中断的任务，重启后自动重试次数
+  handler_threads: 4
+
+# 多个项目共用的参数定义可以用 YAML 锚点复用
+x-nvram-bt-params: &nvram_bt_params
+  # ---- NVRAM 默认值：CFG_BT_Default.h ----
+  # 各字节含义以所用芯片的 MTK BT RF/NVRAM 文档为准，min/max 请按文档收紧
+  - name: Radio
+    aliases: [射频]
+    desc: NVRAM BT Radio 设置（数组，可用下标）
+    file: vendor/mediatek/proprietary/custom/k6789v1_64/cgen/cfgdefault/CFG_BT_Default.h
+    kind: c_array
+    anchor: '/\*\s*Radio\s*\*/'     # 定位注释 /* Radio */，修改其后的 {...}
+    type: byte
+  - name: TxPWOffset
+    aliases: [功率补偿]
+    desc: NVRAM BT TX 功率补偿（数组）
+    file: vendor/mediatek/proprietary/custom/k6789v1_64/cgen/cfgdefault/CFG_BT_Default.h
+    kind: c_array
+    anchor: '/\*\s*TxPWOffset\s*\*/'
+    type: byte
+  # 也可以把数组某个元素单独起名，方便对方直接写名字
+  - name: BT_Radio0
+    desc: Radio[0]
+    file: vendor/mediatek/proprietary/custom/k6789v1_64/cgen/cfgdefault/CFG_BT_Default.h
+    kind: c_array
+    anchor: '/\*\s*Radio\s*\*/'
+    index: 0
+    type: byte
+
+projects:
+  k6789:
+    root: /home/build/alps                 # Android 源码根目录
+    # 用 bash -c 执行；建议只编译受影响的镜像以节省时间
+    build_command: >-
+      source build/envsetup.sh &&
+      lunch vnd_k6789v1_64-userdebug &&
+      make -j32 vnd_images
+    timeout_minutes: 240
+    min_free_gb: 100                       # 编译前检查磁盘剩余空间，0 表示不检查
+    restore_after_build: true              # 编译后还原源码，每次请求都基于干净基线
+    artifacts:                             # 成功后在回复中列出（相对 root，支持通配符）
+      - out/target/product/k6789v1_64/vendor.img
+    publish_dir: null                      # 例如 /mnt/share/bt_rf_builds，产物会复制到 <publish_dir>/<项目>/<任务ID>/
+    publish_url_prefix: null               # 例如 smb://192.168.1.10/bt_rf_builds
+    note: NVRAM 默认值只在 NVRAM 为空时生效，刷机时请选择 Format All + Download 或清除 NVRAM。
+    params:
+      - *nvram_bt_params
+      # ---- key=value 配置文件示例（文件路径与键名请按实际芯片方案修改）----
+      # - name: BtTxPower
+      #   desc: bt.cfg 中的 TX 功率
+      #   file: vendor/mediatek/proprietary/hardware/connectivity/firmware/bt/bt.cfg
+      #   kind: kv
+      #   key: BtTxPower
+      #   type: int
+      #   min: 0
+      #   max: 15
+      # ---- 任意文本，用正则捕获组定位值 ----
+      # - name: BleTxPwr
+      #   file: path/to/some_file.h
+      #   kind: regex
+      #   pattern: '#define\s+BLE_TX_PWR\s+(\S+)'
+      #   type: int
+      #   min: -20
+      #   max: 10

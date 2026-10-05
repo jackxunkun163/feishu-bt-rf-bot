@@ -1,53 +1,60 @@
-# MTK 蓝牙射频参数编译机器人（飞书）
+# MTK 蓝牙射频参数编译（小龙虾 + Jenkins）
 
-有人在飞书里提交 BT RF 参数后，自动完成以下步骤：
-
-1. 校验参数（参数名、范围、个数）→ 2. 修改源码 → 3. 编译 → 4. 回复结果（diff、耗时、产物或错误摘要）→ 5. 还原源码
-
-```
-项目=k6789
-Radio[0]=0x07
-TxPWOffset=0x80,0x82,0x80
-```
-
-有两种部署方式，参数规则、校验和修改逻辑是同一套：
-
-| | 方式一：小龙虾（OpenClaw）+ Jenkins | 方式二：独立飞书机器人 |
-|---|---|---|
-| 和谁对话 | 已接入飞书的小龙虾，可用自然语言、表格描述参数 | 一个专门的飞书机器人，按固定格式发参数 |
-| 谁来编译 | Jenkins（排队、超时、日志由 Jenkins 负责） | 机器人自己在编译服务器上执行编译命令 |
-| 网络要求 | 小龙虾能访问 Jenkins | 编译服务器能访问飞书 |
-| 部署位置 | 技能装在小龙虾上，Pipeline 建在 Jenkins 上 | 机器人运行在编译服务器上 |
-
----
-
-# 方式一：小龙虾 + Jenkins
+在飞书里对小龙虾（OpenClaw）说要改哪些蓝牙射频（BT RF）参数，就会自动完成：
+校验参数 → 同步源码 → 修改参数 → 编译 → 还原源码 → 把结果（改动、diff、产物或错误摘要）回复给提交人。
 
 ```
 飞书用户 ──> 小龙虾（整理参数）──Jenkins API──> 参数化 Pipeline（编译节点）
-                   ^                               │ 校验 → 同步源码 → btbot.rf apply → 编译 → restore
+                   ^                               │ 校验 → 同步 → btbot.rf apply → 编译 → restore
                    └──── 后台长任务轮询结果 ─────────┘ 结果写入构建产物 rf-out/summary.json
 ```
 
-相关文件：
-- `jenkins/Jenkinsfile`：参数化 Pipeline
-- `btbot/rf.py`：修改参数的命令行工具，由 Jenkins 调用，只依赖 PyYAML
-- `openclaw/mtk-bt-rf/`：小龙虾技能，客户端脚本只依赖 Python 标准库
+| 目录 / 文件 | 说明 | 运行位置 |
+|---|---|---|
+| `openclaw/mtk-bt-rf/` | 小龙虾技能：整理参数、调用 Jenkins、回复结果（只依赖 Python 标准库） | 小龙虾所在机器 |
+| `jenkins/Jenkinsfile` | 参数化 Pipeline | Jenkins |
+| `btbot/` | `python -m btbot.rf`：校验并修改参数、备份与还原（只依赖 PyYAML） | Jenkins 编译节点 |
+| `rules.example.yaml` | 参数规则示例：哪些参数能改、在哪个文件、取值范围 | 编译节点（复制为 rules.yaml） |
 
-## 1. Jenkins
+参数格式（每行一个；小龙虾会把自然语言、表格整理成这个格式）：
+```
+Radio[0]=0x07                  # 数组的某个元素
+TxPWOffset=0x80,0x82,0x80      # 一次给出数组全部元素
+BtTxPower=9                    # 单个值
+```
 
-1. **参数规则文件**：在编译节点上放一份 `rules.yaml`，格式与 `config.example.yaml` 相同，只有 `default_project` 和 `projects.<项目>.params` 会被读取。这样文件路径等公司内部信息不会进入代码仓库。
-2. **新建 Pipeline 任务**，例如命名为 `bt-rf-build`：
+## 1. 参数规则
+
+把 `rules.example.yaml` 复制到编译节点，保存为 `rules.yaml`，然后按实际工程修改。这份文件包含公司内部的源码路径，不要提交到公开仓库。
+
+| kind | 适用场景 | 关键字段 |
+|---|---|---|
+| `c_array` | `CFG_BT_Default.h` 里 `/* Radio */ {0x06, 0x80, ...}` 这类数组 | `anchor`：定位数组的正则；`index`：可选，固定修改某个元素 |
+| `kv` | `bt.cfg` / `WMT_SOC.cfg` 这类 `key=value` 文件 | `key` |
+| `regex` | 其它任意文本 | `pattern`：必须恰好一个捕获组 |
+
+通用字段：
+- `type`：`byte`（默认，0~255，写成 `0xNN`）/ `int` / `float` / `string`
+- `min` / `max`：取值范围
+- `aliases`：中文别名
+- `desc`：说明
+
+可以在编译节点上直接验证规则是否写对：
+```bash
+python3 -m btbot.rf list --rules rules.yaml --root /home/build/alps
+```
+
+## 2. Jenkins
+
+1. **新建 Pipeline 任务**，例如命名为 `bt-rf-build`：
    - 选择 Pipeline script from SCM，指向本仓库。Jenkins 访问不了 GitHub 时，可以指向公司内网的镜像仓库。
    - Script Path 填 `jenkins/Jenkinsfile`。
-3. **修改 `jenkins/Jenkinsfile` 顶部的 `CFG`**：
-   - 编译节点标签、源码目录、规则文件路径
+2. **修改 `jenkins/Jenkinsfile` 顶部的 `CFG`**，修改后提交到你们自己的仓库或镜像：
+   - 编译节点标签、源码目录、`rules.yaml` 路径
    - 同步命令、编译命令（从现有编译任务里复制）
    - 产物共享目录（可选）
-
-   修改后提交到你们自己的仓库或镜像。
-4. **首次运行**：点「立即构建」跑一次，默认 ACTION=list。之后 Jenkins 才会识别参数，并列出参数和当前值。
-5. **给小龙虾建一个专用 Jenkins 账号**：只授予该任务的 Read、Build、Cancel 权限，然后生成 API Token。
+3. **首次运行**：点「立即构建」跑一次，默认 ACTION=list。之后 Jenkins 才会识别参数，并列出参数和当前值。
+4. **给小龙虾建一个专用 Jenkins 账号**：只授予该任务的 Read、Build、Cancel 权限，然后生成 API Token。
 
 编译节点需要有 `python3` 和 `python3-venv`；首次运行时会在工作区创建虚拟环境，并安装 PyYAML。
 
@@ -57,9 +64,7 @@ TxPWOffset=0x80,0x82,0x80
 | `check` | 校验参数、预览 diff，不修改源码 | 几秒 |
 | `build` | 先校验 → 同步源码 → 修改 → 编译 → 无论成败都还原源码 | 取决于编译 |
 
-任务设置了 `disableConcurrentBuilds`，多个请求会在 Jenkins 中排队。
-
-## 2. 小龙虾技能
+## 3. 小龙虾技能
 
 1. 把 `openclaw/mtk-bt-rf/` 整个目录复制到小龙虾的技能目录。例如：
    - 全局技能：`~/.openclaw/skills/mtk-bt-rf/`
@@ -76,105 +81,37 @@ TxPWOffset=0x80,0x82,0x80
    ```bash
    python3 ~/.openclaw/skills/mtk-bt-rf/scripts/jenkins_rf.py run --action list
    ```
-4. 在飞书里对小龙虾说「把 BT Radio[0] 改成 0x07 编译一下」，它会按 `SKILL.md` 的流程执行：校验 → 编译（作为后台长任务）→ 回复结果。
+4. 在飞书里对小龙虾说「列出蓝牙射频参数」，确认整条链路是通的。之后就可以直接说「把 Radio[0] 改成 0x07 编译一下」，它会按 `SKILL.md` 的流程执行：校验 → 编译（作为后台长任务）→ 回复结果。
 
-**健壮性**
-- **防重复编译**：用飞书消息 ID 作为请求 ID。重复执行时，不会重复编译，而是继续跟踪原来的构建。
-- **触发请求响应丢失**：先按请求 ID 确认构建是否已提交，再决定是否重试。
-- **Jenkins 不稳定**：网络错误和 Jenkins 重启期间会自动重试，并继续等待构建结果。
-- **兼容 CSRF**：Jenkins 开启了 CSRF crumb 时也能正常提交。
-- **结果来源**：报告读取构建产物 `summary.json`；没有这个文件时（例如节点离线），改用控制台日志末尾。
+## 健壮性
 
----
-
-# 方式二：独立飞书机器人
-
-## 部署（在编译服务器上运行）
-
-### 1. 创建飞书应用
-1. 打开 [飞书开放平台](https://open.feishu.cn/app)，创建「企业自建应用」，在「添加应用能力」中添加**机器人**。
-2. 在「权限管理」中开通以下权限：
-   - `im:message`（获取与发送单聊、群组消息）
-   - `im:message.p2p_msg:readonly`（读取用户发给机器人的单聊消息）
-   - `im:message.group_at_msg:readonly`（接收群聊中 @机器人 的消息）
-   - `im:resource`（上传文件，用于发送编译日志）
-3. 在「事件与回调」→「事件配置」中，订阅方式选择**使用长连接接收事件**，添加事件 `im.message.receive_v1`。
-   注意：需要先把机器人启动起来，长连接方式才能保存成功。
-4. 发布应用版本，然后把机器人拉进群，或者直接单聊。
-
-### 2. 安装与配置
-```bash
-pip install -r requirements.txt
-cp config.example.yaml config.yaml   # 填写 app_id/app_secret、源码路径、编译命令、参数规则
-```
-
-### 3. 本地验证（不连飞书）
-```bash
-python -m btbot.cli -c config.yaml "/params"
-python -m btbot.cli -c config.yaml "/check Radio[0]=0x07"
-```
-
-### 4. 启动
-```bash
-python -m btbot.main -c config.yaml --check   # 自检：源码目录、参数文件、定位规则
-python -m btbot.main -c config.yaml
-```
-长期运行建议使用 systemd，参考 `btbot.service`（崩溃自动重启，停止时预留足够时间还原源码）。
-
-## 参数规则（config.yaml → projects.<项目>.params）
-
-| kind | 适用场景 | 关键字段 |
-|---|---|---|
-| `c_array` | `CFG_BT_Default.h` 里 `/* Radio */ {0x06, 0x80, ...}` 这类数组 | `anchor`：定位数组的正则；`index`：可选，固定修改某个元素 |
-| `kv` | `bt.cfg` / `WMT_SOC.cfg` 这类 `key=value` 文件 | `key` |
-| `regex` | 其它任意文本 | `pattern`：必须恰好一个捕获组 |
-
-通用字段：
-- `type`：`byte`（默认，0~255，写成 `0xNN`）/ `int` / `float` / `string`
-- `min` / `max`：取值范围
-- `aliases`：中文别名
-- `desc`：说明
-
-只有明确配置过的参数才能修改。只要有一项校验失败，所有文件都不会改动。
-
-## 命令
-`/help`、`/params [项目]`、`/check <参数>`（只预览不编译）、`/status`（查看队列）、`/cancel`（取消自己的任务）、`/unblock`（管理员在人工处理后恢复接单）
-
-## 健壮性设计
 | 场景 | 处理方式 |
 |---|---|
-| 参数写错、越界、`nan` 等非法值，或同一参数给了两个不同的值 | 拒绝并说明原因，**一个文件都不改** |
-| 规则定位不唯一（anchor/key 匹配到多处），或 anchor 后面不是数组 | 拒绝修改，提示把规则写精确，避免改错位置 |
-| 写文件中途断电 | 原子写（临时文件 + rename），不会出现写了一半的文件 |
-| 编译中机器人崩溃 / 被 kill / 断电 | 改源码前先备份并写 `journal.json`；重启后先清理残留编译进程（核对进程启动时间，防止 PID 复用后误杀），再还原源码，被中断的任务自动重新排队（重试次数可配置） |
-| 正常停止（SIGTERM / Ctrl+C） | 终止编译、还原源码，当前任务保留在队列中，重启后继续 |
-| 编译期间有人手动改了同一个文件 | 不覆盖对方的修改，只告警；机器人暂停接单，人工确认后发送 `/unblock` 恢复 |
-| 源码还原失败 | 暂停接单并告警，绝不在脏源码上继续编译 |
-| 排队任务 | 持久化到 `queue.json`，重启不丢 |
-| 飞书重复推送、重启后补推旧消息 | message_id 去重记录持久化，并忽略超过 N 分钟的旧消息 |
-| 飞书 API 网络错误或限流 | 指数退避重试；卡片发送失败时降级为纯文本；日志上传失败时回复服务器上的路径 |
-| 长连接断开 | SDK 自动重连，外层循环兜底重连 |
-| 编译超时、取消 | 杀掉整个进程组，源码自动还原 |
-| 编译日志过大 | 先 gzip 压缩，压缩后仍超过 30MB 则只上传日志末尾 |
-| 磁盘空间不足 | 编译前检查 `min_free_gb`，不足时直接拒绝并告警 |
-| 有人滥用、刷请求 | 白名单、每人任务数上限、队列总数上限、消息长度上限 |
-| 同时启动了两个机器人进程 | 文件锁保证单实例 |
-| 消息处理代码出现 bug | 每条消息独立捕获异常，回复出错信息并告警，不影响服务 |
+| 参数名写错、越界、`nan` 等非法值，或同一参数给了两个不同的值 | 校验阶段几秒内就失败（不用等同步源码），把错误逐条回复给用户，**不修改任何文件** |
+| 规则定位不唯一，或 anchor 后面不是数组 | 拒绝修改，避免改错位置 |
+| 修改文件 | 原子写；GBK 注释、CRLF 换行原样保留 |
+| 编译失败、超时、被取消 | Pipeline 收尾步骤无论成败都还原源码；从编译日志中提取错误摘要回复给用户 |
+| 编译期间有人改了同一个文件 | 不覆盖对方的修改，构建标红，报告中提示联系管理员 |
+| 多人同时提交 | Jenkins 串行执行，其余排队 |
+| 同一条消息被重复处理 | 用飞书消息 ID 作为请求 ID，不会重复编译，而是继续跟踪原来的构建 |
+| 触发请求的响应丢失 | 先按请求 ID 确认构建是否已提交，再决定是否重试 |
+| 网络抖动、Jenkins 重启 | 自动重试，并继续等待构建结果 |
+| Jenkins 开启了 CSRF crumb | 自动获取后提交 |
+| 节点离线等导致没有 summary.json | 改用控制台日志末尾作为错误信息 |
+| 参数注入 | 参数通过文件交给 btbot.rf，不经过 shell；项目名和请求 ID 按白名单字符校验 |
 
 ## 注意
-- 同一时间只编译一个任务，其余排队。执行前会基于当时的源码重新校验一次。
-- `restore_after_build: true`（默认）：每次编译后都会还原源码，各请求互不影响。
 - NVRAM 默认值（`CFG_BT_Default.h`）只在 NVRAM 为空时生效，刷机时需要清除 NVRAM 或 Format All。
-- 生产环境建议配置 `allowed_users` 白名单。
-- `data/` 目录内容：`bot.log`（滚动保存）、`jobs/<任务ID>/`（diff、编译日志、原文件备份）、`history.jsonl`、`queue.json`、`journal.json`。
-- 配置 `alert_chat_id` 后，崩溃恢复、还原失败、磁盘不足等情况会推送到管理员群。
+- 每次构建的 `rf-out/summary.json` 和 `rf-out/changes.diff` 都会归档到 Jenkins，便于追溯。
 
----
-
-# 测试与 CI
+## 测试与 CI
 ```bash
-pip install pytest
+pip install -r requirements.txt pytest
 python -m pytest tests
 ```
-GitHub Actions（`.github/workflows/ci.yml`）在 push 到 main 和提交 PR 时自动运行全部测试，覆盖 Ubuntu（Python 3.9、3.12）和 Windows。测试内容包括参数解析与校验、文件修改、编译成功/失败、取消、优雅退出、崩溃恢复、单实例锁、进程组清理；`btbot.rf` 命令行；以及用模拟 Jenkins 服务器测试小龙虾技能脚本（排队、防重复、CSRF、失败报告、取消等）。
-实际修改源码和编译在你们自己的编译服务器上进行，CI 用模拟的源码目录和编译脚本，不需要 Android 源码。
+GitHub Actions（`.github/workflows/ci.yml`）在 push 到 main 和提交 PR 时自动运行全部测试，覆盖 Ubuntu（Python 3.9、3.12）和 Windows。测试内容包括：
+- 参数解析、校验与文件修改
+- `btbot.rf` 命令行
+- 用模拟 Jenkins 服务器测试技能脚本：排队、防重复、CSRF、失败报告、取消等
+
+修改源码和编译只在 Jenkins 编译节点上进行，CI 不需要 Android 源码。

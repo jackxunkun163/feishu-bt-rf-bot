@@ -3,6 +3,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
-data/
-config.yaml
-btbot.env
+# 含公司内部路径的实际规则文件不要提交
+rules.yaml
+rf-out/

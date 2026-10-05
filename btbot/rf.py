@@ -16,17 +16,33 @@ restore / finish 会把还原结果、编译结果和错误摘要合并进 summa
 from __future__ import annotations
 
 import argparse
-import json
 import os
+import re
 import sys
 
-from .builder import error_summary
-from .config import load_rules
 from .journal import backup_files, restore_files
 from .params import ParamError, current_value, make_plan, parse_message, write_text
+from .rules import load_rules
 from .store import load_json, save_json
 
 EXIT_PARAMS, EXIT_RESTORE, EXIT_OTHER = 2, 3, 1
+_ERR_RE = re.compile(r"(error:|error \d+|FAILED:|ninja: build stopped|make: \*\*\*|fatal:|Traceback)", re.I)
+
+
+def error_summary(log_path: str, max_err_lines: int = 25, tail_lines: int = 15) -> str:
+    """从编译日志末尾提取错误行 + 最后几行。"""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 4 * 1024 * 1024))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError as e:
+        return f"读取日志失败: {e}"
+    lines = [re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line) for line in lines]
+    errs = [line for line in lines if _ERR_RE.search(line)][-max_err_lines:]
+    parts = ["\n".join(errs)] if errs else []
+    parts.append("--- 日志末尾 ---\n" + "\n".join(lines[-tail_lines:]))
+    return "\n".join(parts)
 
 
 class CliError(Exception):
@@ -172,7 +188,7 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("list", "check", "apply"):
         p = sub.add_parser(name)
-        p.add_argument("--rules", required=True, help="参数规则文件（与 config.yaml 格式相同）")
+        p.add_argument("--rules", required=True, help="参数规则文件，格式见 rules.example.yaml")
         p.add_argument("--project")
         p.add_argument("--root", required=True, help="Android 源码根目录")
         p.add_argument("--out", help="结果目录（summary.json、changes.diff、备份）")

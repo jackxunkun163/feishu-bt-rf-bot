@@ -18,7 +18,7 @@ CFG = [
     syncCmd     : 'repo forall -c "git reset -q --hard && git clean -qfd" && repo sync -c -j8 --force-sync',
     // 编译命令：替换成现有编译任务里的编译步骤（用 bash 执行）
     buildCmd    : 'source build/envsetup.sh && lunch vnd_k6789v1_64-userdebug && make -j32 vnd_images',
-    rulesFile   : '/home/build/btbot/rules.yaml',      // 参数规则（格式同 config.example.yaml 的 projects 部分）
+    rulesFile   : '/home/build/btbot/rules.yaml',      // 参数规则，格式见 rules.example.yaml
     // 编译成功后复制到共享目录的产物（相对 srcDir，空格分隔，支持通配符）
     artifacts   : 'out/target/product/k6789v1_64/vendor.img',
     publishDir  : '',                                  // 例如 /mnt/share/bt_rf_builds；留空则不复制

@@ -1,6 +1,6 @@
 """蓝牙射频参数：解析用户消息、校验、生成文件修改。
 
-支持三种修改方式（在 config.yaml 中按参数配置 kind）：
+支持三种修改方式（在规则文件 rules.yaml 中按参数配置 kind）：
   c_array : C 源码中的数组，如 CFG_BT_Default.h 里 /* Radio */ 后面的 {0x06, 0x80, ...}
   kv      : key=value 形式的配置文件，如 bt.cfg / WMT_SOC.cfg
   regex   : 任意文本，用带一个捕获组的正则定位要替换的值

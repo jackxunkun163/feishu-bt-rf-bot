@@ -1,0 +1,61 @@
+# 参数规则示例。复制为编译节点上的 rules.yaml（路径填到 jenkins/Jenkinsfile 的 CFG.rulesFile），按实际工程修改。
+# 只有这里定义的参数才能被修改；所有值都会按 type / min / max 严格校验。
+#
+# kind 说明：
+#   c_array  C 源码中的数组，anchor 是定位数组的正则，数组 {...} 必须紧跟其后（中间只能有空白、注释、=）
+#            可写下标 名称[i]=值，或一次给全部元素 名称=v1,v2,...；配置 index 则固定修改某个元素
+#   kv       key=value 形式的配置文件，key 默认等于 name
+#   regex    任意文本，pattern 必须恰好一个捕获组（被替换的值）
+# type：byte（默认，0~255，写成 0xNN）/ int / float / string；min / max 为取值范围
+# anchor / key / pattern 在文件中必须唯一匹配，否则拒绝修改。
+
+default_project: k6789   # Jenkins 的 PROJECT 参数留空时使用
+
+# 多个项目共用的参数定义可以用 YAML 锚点复用
+x-nvram-bt-params: &nvram_bt_params
+  # ---- NVRAM 默认值：CFG_BT_Default.h ----
+  # 各字节含义以所用芯片的 MTK BT RF/NVRAM 文档为准，min/max 请按文档收紧
+  - name: Radio
+    aliases: [射频]
+    desc: NVRAM BT Radio 设置（数组，可用下标）
+    file: vendor/mediatek/proprietary/custom/k6789v1_64/cgen/cfgdefault/CFG_BT_Default.h
+    kind: c_array
+    anchor: '/\*\s*Radio\s*\*/'     # 定位注释 /* Radio */，修改其后的 {...}
+    type: byte
+  - name: TxPWOffset
+    aliases: [功率补偿]
+    desc: NVRAM BT TX 功率补偿（数组）
+    file: vendor/mediatek/proprietary/custom/k6789v1_64/cgen/cfgdefault/CFG_BT_Default.h
+    kind: c_array
+    anchor: '/\*\s*TxPWOffset\s*\*/'
+    type: byte
+  # 也可以把数组某个元素单独起名，方便直接写名字
+  - name: BT_Radio0
+    desc: Radio[0]
+    file: vendor/mediatek/proprietary/custom/k6789v1_64/cgen/cfgdefault/CFG_BT_Default.h
+    kind: c_array
+    anchor: '/\*\s*Radio\s*\*/'
+    index: 0
+    type: byte
+
+projects:
+  k6789:
+    params:
+      - *nvram_bt_params
+      # ---- key=value 配置文件示例（文件路径与键名请按实际芯片方案修改）----
+      # - name: BtTxPower
+      #   desc: bt.cfg 中的 TX 功率
+      #   file: vendor/mediatek/proprietary/hardware/connectivity/firmware/bt/bt.cfg
+      #   kind: kv
+      #   key: BtTxPower
+      #   type: int
+      #   min: 0
+      #   max: 15
+      # ---- 任意文本，用正则捕获组定位值 ----
+      # - name: BleTxPwr
+      #   file: path/to/some_file.h
+      #   kind: regex
+      #   pattern: '#define\s+BLE_TX_PWR\s+(\S+)'
+      #   type: int
+      #   min: -20
+      #   max: 10

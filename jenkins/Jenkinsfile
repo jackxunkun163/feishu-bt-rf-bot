@@ -1,0 +1,154 @@
+// MTK 蓝牙射频参数编译任务（参数化 Pipeline）
+//
+// 用法：Jenkins 新建 Pipeline 任务 → Pipeline script from SCM → 指向本仓库（或公司内网镜像），
+//       Script Path 填 jenkins/Jenkinsfile；然后按实际环境修改下面的 CFG。
+// 首次运行后 Jenkins 才会识别参数：第一次直接点“立即构建”跑一次（默认 ACTION=list）。
+//
+// ACTION：
+//   list   列出支持的参数及当前值（不同步、不编译，几秒钟）
+//   check  校验参数并预览 diff（不同步、不编译）
+//   build  校验 → 同步源码 → 修改参数 → 编译 → 还原源码
+// 结果统一写入构建产物 rf-out/summary.json，供小龙虾技能读取。
+
+// 不加 def：作为脚本全局变量，pipeline 和下方的 rf() 方法都能访问
+CFG = [
+    agentLabel  : 'mtk-build',                         // 有 Android 源码的编译节点标签
+    srcDir      : '/home/build/alps',                  // Android 源码目录
+    // 同步源码：替换成现有编译任务里的同步步骤。先丢弃本地改动，保证从干净状态开始
+    syncCmd     : 'repo forall -c "git reset -q --hard && git clean -qfd" && repo sync -c -j8 --force-sync',
+    // 编译命令：替换成现有编译任务里的编译步骤（用 bash 执行）
+    buildCmd    : 'source build/envsetup.sh && lunch vnd_k6789v1_64-userdebug && make -j32 vnd_images',
+    rulesFile   : '/home/build/btbot/rules.yaml',      // 参数规则（格式同 config.example.yaml 的 projects 部分）
+    // 编译成功后复制到共享目录的产物（相对 srcDir，空格分隔，支持通配符）
+    artifacts   : 'out/target/product/k6789v1_64/vendor.img',
+    publishDir  : '',                                  // 例如 /mnt/share/bt_rf_builds；留空则不复制
+    publishUrl  : '',                                  // 共享目录对应的访问地址，例如 smb://192.168.1.10/bt_rf_builds
+    timeoutHours: 4,
+]
+
+pipeline {
+    agent { label "${CFG.agentLabel}" }
+
+    parameters {
+        choice(name: 'ACTION', choices: ['list', 'check', 'build'], description: 'list=列出参数；check=只校验预览；build=改参数并编译')
+        string(name: 'PROJECT', defaultValue: '', description: '规则文件中的项目名，留空用 default_project')
+        text(name: 'BT_PARAMS', defaultValue: '', description: '每行一个：名称=值 或 名称[下标]=值')
+        string(name: 'REQUESTER', defaultValue: '', description: '提交人（显示在构建描述里）')
+        string(name: 'REQUEST_ID', defaultValue: '', description: '调用方生成的请求 ID，用于查找构建、防止重复提交')
+    }
+
+    options {
+        disableConcurrentBuilds()              // 共用同一份源码，必须串行，其余排队
+        timeout(time: CFG.timeoutHours, unit: 'HOURS')
+        buildDiscarder(logRotator(numToKeepStr: '200', artifactNumToKeepStr: '200'))
+        skipDefaultCheckout()
+    }
+
+    environment {
+        RF_OUT = "${WORKSPACE}/rf-out"
+        PY = "${WORKSPACE}/.venv/bin/python"
+        PYTHONUNBUFFERED = '1'
+    }
+
+    stages {
+        stage('准备') {
+            steps {
+                script {
+                    if (!(params.PROJECT ==~ /[A-Za-z0-9_.\-]*/)) { error("非法的 PROJECT: ${params.PROJECT}") }
+                    if (!(params.REQUEST_ID ==~ /[A-Za-z0-9_.\-]*/)) { error("非法的 REQUEST_ID: ${params.REQUEST_ID}") }
+                    def who = params.REQUESTER ? params.REQUESTER.take(40) : '手动'
+                    currentBuild.description = "${params.ACTION} ${params.PROJECT ?: ''} by ${who}" +
+                        (params.REQUEST_ID ? " [${params.REQUEST_ID}]" : '')
+                }
+                dir('btbot-tool') { checkout scm }
+                sh label: '准备 Python 环境', script: '''
+                    rm -rf "$RF_OUT" && mkdir -p "$RF_OUT"
+                    [ -x "$PY" ] || python3 -m venv "$WORKSPACE/.venv"
+                    "$PY" -c "import yaml" 2>/dev/null || "$PY" -m pip install -q PyYAML
+                '''
+                // 参数通过文件传递，不经过 shell，避免注入和转义问题
+                writeFile file: 'rf-out/params.txt', text: params.BT_PARAMS ?: '', encoding: 'UTF-8'
+            }
+        }
+
+        stage('列出参数') {
+            when { expression { params.ACTION == 'list' } }
+            steps { rf('list', false) }
+        }
+
+        stage('校验参数') {
+            // build 也先在同步前快速校验一次：参数写错时几秒内就失败，不用等同步
+            when { expression { params.ACTION in ['check', 'build'] } }
+            steps { rf('check', true) }
+        }
+
+        stage('同步源码') {
+            when { expression { params.ACTION == 'build' } }
+            steps { dir(CFG.srcDir) { sh label: '同步源码', script: "#!/bin/bash -e\n${CFG.syncCmd}" } }
+        }
+
+        stage('修改参数') {
+            when { expression { params.ACTION == 'build' } }
+            steps { rf('apply', true) }
+        }
+
+        stage('编译') {
+            when { expression { params.ACTION == 'build' } }
+            steps {
+                dir(CFG.srcDir) {
+                    sh label: '编译', script: "#!/bin/bash -e\nset -o pipefail\n( ${CFG.buildCmd} ) 2>&1 | tee \"\$RF_OUT/build.log\""
+                }
+            }
+        }
+
+        stage('发布产物') {
+            when { expression { params.ACTION == 'build' && CFG.publishDir != '' } }
+            steps {
+                dir(CFG.srcDir) {
+                    sh label: '复制产物', script: """#!/bin/bash -e
+                        dest="${CFG.publishDir}/\${PROJECT:-default}/${env.BUILD_NUMBER}"
+                        mkdir -p "\$dest"
+                        cp -v ${CFG.artifacts} "\$dest"/
+                        cp "\$RF_OUT/changes.diff" "\$dest"/
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                if (params.ACTION == 'build') {
+                    // 无论成功失败都还原源码；还原异常会写入 summary.json 并让构建失败
+                    def rc = sh(returnStatus: true, label: '还原源码', script: '''
+                        cd "$WORKSPACE/btbot-tool" && "$PY" -m btbot.rf restore --out "$RF_OUT"
+                    ''')
+                    if (rc != 0) { currentBuild.result = 'FAILURE' }
+                    def links = ''
+                    if (CFG.publishDir && currentBuild.currentResult == 'SUCCESS') {
+                        links = "${CFG.publishUrl ?: CFG.publishDir}/${params.PROJECT ?: 'default'}/${env.BUILD_NUMBER}/"
+                    }
+                    withEnv(["RF_RESULT=${currentBuild.currentResult}", "RF_LINKS=${links}"]) {
+                        sh(returnStatus: true, label: '记录结果', script: '''
+                            cd "$WORKSPACE/btbot-tool" && "$PY" -m btbot.rf finish --out "$RF_OUT" \
+                                --result "$RF_RESULT" --log "$RF_OUT/build.log" ${RF_LINKS:+--artifacts "$RF_LINKS"}
+                        ''')
+                    }
+                }
+            }
+            archiveArtifacts artifacts: 'rf-out/summary.json, rf-out/changes.diff', allowEmptyArchive: true
+        }
+    }
+}
+
+// 调用 btbot.rf 子命令；参数文本从文件读取
+def rf(String action, boolean withParams) {
+    dir('btbot-tool') {
+        def project = params.PROJECT ? "--project '${params.PROJECT}'" : ''
+        def p = withParams ? '--params-file "$RF_OUT/params.txt"' : ''
+        sh label: "btbot.rf ${action}", script: """
+            "\$PY" -m btbot.rf ${action} --rules '${CFG.rulesFile}' --root '${CFG.srcDir}' ${project} ${p} --out "\$RF_OUT"
+        """
+    }
+}

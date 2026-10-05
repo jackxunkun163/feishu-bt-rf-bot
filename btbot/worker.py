@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import gzip
-import hashlib
 import json
 import logging
 import os
@@ -23,7 +22,8 @@ from typing import Protocol
 from . import builder as B
 from .config import Config
 from .feishu import FILE_LIMIT, code_block
-from .params import ParamError, make_plan, parse_message, read_text, write_text
+from .journal import backup_files, restore_files
+from .params import ParamError, make_plan, parse_message, write_text
 from .store import load_json, save_json
 
 log = logging.getLogger(__name__)
@@ -53,10 +53,6 @@ class Job:
 
     def describe(self) -> str:
         return f"`{self.id}` 项目 {self.project}，<at id={self.requester}></at>"
-
-
-def _sha(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8", "surrogateescape")).hexdigest()
 
 
 class Worker(threading.Thread):
@@ -177,13 +173,7 @@ class Worker(threading.Thread):
         self._persist()
 
     def _write_journal(self, job: Job, plan, job_dir: str) -> dict:
-        bdir = os.path.join(job_dir, "backup")
-        os.makedirs(bdir, exist_ok=True)
-        files = []
-        for i, (path, old) in enumerate(plan.old_texts.items()):
-            bk = os.path.join(bdir, f"{i}_{os.path.basename(path)}")
-            write_text(bk, old)
-            files.append({"path": path, "backup": bk, "orig_sha": _sha(old), "new_sha": _sha(plan.new_texts[path])})
+        files = backup_files(plan, os.path.join(job_dir, "backup"))
         journal = {"job_id": job.id, "files": files, "pid": None, "pid_token": None}
         save_json(self.journal_path, journal)
         return journal
@@ -195,22 +185,7 @@ class Worker(threading.Thread):
             pass
 
     def _restore(self, journal: dict) -> list[str]:
-        """按 journal 还原源码，返回问题列表（空表示全部成功）。"""
-        problems = []
-        for f in journal["files"]:
-            path = f["path"]
-            try:
-                cur = _sha(read_text(path)) if os.path.exists(path) else None
-                if cur == f["orig_sha"]:
-                    continue  # 尚未改动或已还原
-                if cur != f["new_sha"]:
-                    # 编译期间文件被别人改过：不覆盖，留给人工处理
-                    problems.append(f"{path} 在编译期间被其它人修改，未自动还原，原始内容备份在 {f['backup']}")
-                    continue
-                write_text(path, read_text(f["backup"]))
-            except OSError as e:
-                problems.append(f"还原 {path} 失败: {e}（备份在 {f['backup']}）")
-        return problems
+        return restore_files(journal["files"])
 
     # ------------------------------------------------------------ 执行
     def run(self):

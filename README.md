@@ -1,14 +1,93 @@
 # MTK 蓝牙射频参数编译机器人（飞书）
 
-有人在飞书里给机器人发送 BT RF 参数后，机器人会自动完成以下步骤：
+有人在飞书里提交 BT RF 参数后，自动完成以下步骤：
 
-1. 校验参数（参数名、范围、个数）→ 2. 修改源码 → 3. 编译 → 4. 回复结果（diff、耗时、产物或错误摘要，失败时附上完整日志）→ 5. 还原源码
+1. 校验参数（参数名、范围、个数）→ 2. 修改源码 → 3. 编译 → 4. 回复结果（diff、耗时、产物或错误摘要）→ 5. 还原源码
 
 ```
 项目=k6789
 Radio[0]=0x07
 TxPWOffset=0x80,0x82,0x80
 ```
+
+有两种部署方式，参数规则、校验和修改逻辑是同一套：
+
+| | 方式一：小龙虾（OpenClaw）+ Jenkins | 方式二：独立飞书机器人 |
+|---|---|---|
+| 和谁对话 | 已接入飞书的小龙虾，可用自然语言、表格描述参数 | 一个专门的飞书机器人，按固定格式发参数 |
+| 谁来编译 | Jenkins（排队、超时、日志由 Jenkins 负责） | 机器人自己在编译服务器上执行编译命令 |
+| 网络要求 | 小龙虾能访问 Jenkins | 编译服务器能访问飞书 |
+| 部署位置 | 技能装在小龙虾上，Pipeline 建在 Jenkins 上 | 机器人运行在编译服务器上 |
+
+---
+
+# 方式一：小龙虾 + Jenkins
+
+```
+飞书用户 ──> 小龙虾（整理参数）──Jenkins API──> 参数化 Pipeline（编译节点）
+                   ^                               │ 校验 → 同步源码 → btbot.rf apply → 编译 → restore
+                   └──── 后台长任务轮询结果 ─────────┘ 结果写入构建产物 rf-out/summary.json
+```
+
+相关文件：
+- `jenkins/Jenkinsfile`：参数化 Pipeline
+- `btbot/rf.py`：修改参数的命令行工具，由 Jenkins 调用，只依赖 PyYAML
+- `openclaw/mtk-bt-rf/`：小龙虾技能，客户端脚本只依赖 Python 标准库
+
+## 1. Jenkins
+
+1. **参数规则文件**：在编译节点上放一份 `rules.yaml`，格式与 `config.example.yaml` 相同，只有 `default_project` 和 `projects.<项目>.params` 会被读取。这样文件路径等公司内部信息不会进入代码仓库。
+2. **新建 Pipeline 任务**，例如命名为 `bt-rf-build`：
+   - 选择 Pipeline script from SCM，指向本仓库。Jenkins 访问不了 GitHub 时，可以指向公司内网的镜像仓库。
+   - Script Path 填 `jenkins/Jenkinsfile`。
+3. **修改 `jenkins/Jenkinsfile` 顶部的 `CFG`**：
+   - 编译节点标签、源码目录、规则文件路径
+   - 同步命令、编译命令（从现有编译任务里复制）
+   - 产物共享目录（可选）
+
+   修改后提交到你们自己的仓库或镜像。
+4. **首次运行**：点「立即构建」跑一次，默认 ACTION=list。之后 Jenkins 才会识别参数，并列出参数和当前值。
+5. **给小龙虾建一个专用 Jenkins 账号**：只授予该任务的 Read、Build、Cancel 权限，然后生成 API Token。
+
+编译节点需要有 `python3` 和 `python3-venv`；首次运行时会在工作区创建虚拟环境，并安装 PyYAML。
+
+| ACTION | 作用 | 耗时 |
+|---|---|---|
+| `list` | 列出参数及当前值 | 几秒 |
+| `check` | 校验参数、预览 diff，不修改源码 | 几秒 |
+| `build` | 先校验 → 同步源码 → 修改 → 编译 → 无论成败都还原源码 | 取决于编译 |
+
+任务设置了 `disableConcurrentBuilds`，多个请求会在 Jenkins 中排队。
+
+## 2. 小龙虾技能
+
+1. 把 `openclaw/mtk-bt-rf/` 整个目录复制到小龙虾的技能目录。例如：
+   - 全局技能：`~/.openclaw/skills/mtk-bt-rf/`
+   - 工作区技能：`<workspace>/skills/mtk-bt-rf/`
+2. 为技能提供环境变量：
+   - `JENKINS_URL`
+   - `JENKINS_USER`
+   - `JENKINS_TOKEN`
+   - `JENKINS_JOB`：例如 `bt-rf-build`，在文件夹里的写 `文件夹/bt-rf-build`
+   - `JENKINS_INSECURE=1`：可选，Jenkins 使用自签名证书时设置
+
+   可以在 OpenClaw 配置的 `skills.entries.mtk-bt-rf.env` 中设置，也可以设置在运行小龙虾的环境里。具体写法以你所用 OpenClaw 版本的文档为准。如果小龙虾在沙箱（Docker）中执行命令，要确保沙箱里也有这些变量，并且能访问 Jenkins。
+3. 在小龙虾所在机器上验证：
+   ```bash
+   python3 ~/.openclaw/skills/mtk-bt-rf/scripts/jenkins_rf.py run --action list
+   ```
+4. 在飞书里对小龙虾说「把 BT Radio[0] 改成 0x07 编译一下」，它会按 `SKILL.md` 的流程执行：校验 → 编译（作为后台长任务）→ 回复结果。
+
+**健壮性**
+- **防重复编译**：用飞书消息 ID 作为请求 ID。重复执行时，不会重复编译，而是继续跟踪原来的构建。
+- **触发请求响应丢失**：先按请求 ID 确认构建是否已提交，再决定是否重试。
+- **Jenkins 不稳定**：网络错误和 Jenkins 重启期间会自动重试，并继续等待构建结果。
+- **兼容 CSRF**：Jenkins 开启了 CSRF crumb 时也能正常提交。
+- **结果来源**：报告读取构建产物 `summary.json`；没有这个文件时（例如节点离线），改用控制台日志末尾。
+
+---
+
+# 方式二：独立飞书机器人
 
 ## 部署（在编译服务器上运行）
 
@@ -90,10 +169,12 @@ python -m btbot.main -c config.yaml
 - `data/` 目录内容：`bot.log`（滚动保存）、`jobs/<任务ID>/`（diff、编译日志、原文件备份）、`history.jsonl`、`queue.json`、`journal.json`。
 - 配置 `alert_chat_id` 后，崩溃恢复、还原失败、磁盘不足等情况会推送到管理员群。
 
-## 测试与 CI
+---
+
+# 测试与 CI
 ```bash
 pip install pytest
 python -m pytest tests
 ```
-GitHub Actions（`.github/workflows/ci.yml`）在 push 到 main 和提交 PR 时自动运行全部测试，覆盖 Ubuntu（Python 3.9、3.12）和 Windows。测试内容包括参数解析与校验、文件修改、编译成功/失败、取消、优雅退出、崩溃恢复、单实例锁、进程组清理等。
+GitHub Actions（`.github/workflows/ci.yml`）在 push 到 main 和提交 PR 时自动运行全部测试，覆盖 Ubuntu（Python 3.9、3.12）和 Windows。测试内容包括参数解析与校验、文件修改、编译成功/失败、取消、优雅退出、崩溃恢复、单实例锁、进程组清理；`btbot.rf` 命令行；以及用模拟 Jenkins 服务器测试小龙虾技能脚本（排队、防重复、CSRF、失败报告、取消等）。
 实际修改源码和编译在你们自己的编译服务器上进行，CI 用模拟的源码目录和编译脚本，不需要 Android 源码。

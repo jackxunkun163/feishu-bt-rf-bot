@@ -77,6 +77,30 @@ def _build(cls, d: dict, where: str):
     return cls(**d)
 
 
+def parse_rules(project: str, raw) -> list[Rule]:
+    flat = []  # 支持在 params 中引用 YAML 锚点列表
+    for r in raw or []:
+        flat.extend(r if isinstance(r, list) else [r])
+    if not flat:
+        raise ValueError(f"项目 {project} 没有配置 params")
+    rules = [Rule.from_dict(r) for r in flat]
+    names = [n.lower() for r in rules for n in [r.name, *r.aliases]]
+    if len(names) != len(set(names)):
+        raise ValueError(f"项目 {project} 的参数名/别名有重复")
+    return rules
+
+
+def load_rules(path: str) -> tuple[dict[str, list[Rule]], str | None]:
+    """只读取参数规则（projects.<名>.params 与 default_project），供 Jenkins 命令行使用。
+    与 config.yaml 格式兼容，可以直接共用同一个文件。"""
+    with open(path, encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    projects = {name: parse_rules(name, (p or {}).get("params")) for name, p in (raw.get("projects") or {}).items()}
+    if not projects:
+        raise ValueError(f"{path} 中没有配置 projects")
+    return projects, raw.get("default_project")
+
+
 def load_config(path: str) -> Config:
     with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
@@ -84,15 +108,7 @@ def load_config(path: str) -> Config:
     projects = {}
     for name, p in (raw.get("projects") or {}).items():
         p = dict(p)
-        flat = []  # 支持在 params 中引用 YAML 锚点列表
-        for r in p.pop("params", None) or []:
-            flat.extend(r if isinstance(r, list) else [r])
-        if not flat:
-            raise ValueError(f"项目 {name} 没有配置 params")
-        rules = [Rule.from_dict(r) for r in flat]
-        names = [n.lower() for r in rules for n in [r.name, *r.aliases]]
-        if len(names) != len(set(names)):
-            raise ValueError(f"项目 {name} 的参数名/别名有重复")
+        rules = parse_rules(name, p.pop("params", None))
         for req in ("root", "build_command"):
             if not p.get(req):
                 raise ValueError(f"项目 {name} 缺少 {req}")
